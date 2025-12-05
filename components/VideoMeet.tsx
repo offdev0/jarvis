@@ -77,13 +77,14 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
     };
   }, []);
 
-  // Sync Video Ref
+  // Sync Video Ref - FIXED: Added isInCall dependency to re-attach stream on view switch
   useEffect(() => {
     localStreamRef.current = localStream;
     if (localVideoRef.current && localStream) {
        localVideoRef.current.srcObject = localStream;
+       localVideoRef.current.play().catch(e => console.log('Autoplay blocked:', e));
     }
-  }, [localStream]);
+  }, [localStream, isInCall]);
 
   // --- Mesh Network Logic ---
 
