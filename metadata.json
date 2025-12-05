@@ -1,0 +1,8 @@
+{
+  "name": "Jarvis Hub - Multi-Agent AI",
+  "description": "A futuristic multi-agent AI system featuring a central Master AI router and specialized sub-agents for Social Media, HR, Email, and Image Generation tasks, powered by Gemini 2.5.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
