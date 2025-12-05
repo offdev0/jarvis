@@ -66,7 +66,16 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
     };
     initMedia();
 
+    // Handle abrupt tab closures to notify peers
+    const handleBeforeUnload = () => {
+       if (peerRef.current) {
+          peerRef.current.destroy();
+       }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
     return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
       // Cleanup tracks
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => track.stop());
@@ -201,12 +210,8 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
       call.answer(localStreamRef.current); // Answer with audio/video
       callsRef.current.push(call);
       
-      call.on('stream', (remoteStream: MediaStream) => {
-        handleRemoteStream(call.peer, remoteStream);
-      });
-      
-      call.on('close', () => removePeer(call.peer));
-      call.on('error', () => removePeer(call.peer));
+      // Subscribe to all health events
+      subscribeToCallEvents(call);
     });
 
     // Handle Incoming Data Connections (Chat & Signaling)
@@ -215,13 +220,40 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
     });
   };
 
+  // 4.5 Robust Call Event Subscription (Centralized logic for cleanup)
+  const subscribeToCallEvents = (call: any) => {
+      call.on('stream', (remoteStream: MediaStream) => {
+        handleRemoteStream(call.peer, remoteStream);
+      });
+
+      // Standard Close
+      call.on('close', () => {
+          console.log('Call closed:', call.peer);
+          removePeer(call.peer);
+      });
+      
+      call.on('error', (err: any) => {
+          console.error('Call error:', err);
+          removePeer(call.peer);
+      });
+
+      // ICE State Monitoring (Critical for detecting tab closures)
+      if (call.peerConnection) {
+          call.peerConnection.oniceconnectionstatechange = () => {
+              const state = call.peerConnection.iceConnectionState;
+              if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+                  console.log(`Peer ${call.peer} ICE state: ${state} -> removing`);
+                  removePeer(call.peer);
+              }
+          };
+      }
+  };
+
   // 5. Data Connection Handler (Chat & Signaling)
   const setupDataConnection = (conn: any) => {
     dataConnsRef.current.push(conn);
     
     conn.on('data', (data: any) => {
-      console.log('Received data:', data);
-      
       // Handle Chat
       if (data.type === 'chat') {
         setChatMessages(prev => [...prev, data.payload]);
@@ -242,13 +274,18 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
       }
     });
 
-    conn.on('close', () => {
-       removePeer(conn.peer);
-    });
-    
-    conn.on('error', () => {
-       removePeer(conn.peer);
-    });
+    conn.on('close', () => removePeer(conn.peer));
+    conn.on('error', () => removePeer(conn.peer));
+
+    // Monitor Data ICE state too
+    if (conn.peerConnection) {
+       conn.peerConnection.oniceconnectionstatechange = () => {
+          const state = conn.peerConnection.iceConnectionState;
+          if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+             removePeer(conn.peer);
+          }
+       };
+    }
   };
 
   // 6. Connect to Mesh (Guest Logic)
@@ -277,11 +314,7 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
      const call = peerRef.current.call(targetId, localStreamRef.current);
      callsRef.current.push(call);
 
-     call.on('stream', (remoteStream: MediaStream) => {
-        handleRemoteStream(targetId, remoteStream);
-     });
-     
-     call.on('error', (e: any) => console.error('Call error:', e));
+     subscribeToCallEvents(call);
   };
 
   const handleRemoteStream = (peerId: string, stream: MediaStream) => {
@@ -292,6 +325,7 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
   };
 
   const removePeer = (id: string) => {
+    console.log(`Removing peer: ${id}`);
     setRemoteStreams(prev => prev.filter(p => p.peerId !== id));
     callsRef.current = callsRef.current.filter(c => c.peer !== id);
     dataConnsRef.current = dataConnsRef.current.filter(c => c.peer !== id);
