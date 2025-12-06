@@ -25,7 +25,7 @@ interface TranscriptItem {
   timestamp: number;
 }
 
-type FilterType = 'none' | 'cyber' | 'terminator' | 'matrix' | 'blur' | 'mono' | 'rgb' | 'starfield';
+type FilterType = 'none' | 'cyber' | 'terminator' | 'matrix' | 'blur' | 'mono' | 'rgb' | 'starfield' | 'blur-bg' | 'virtual-office' | 'virtual-sunset';
 
 const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
   // Connection State
@@ -72,6 +72,12 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
   const dataConnsRef = useRef<any[]>([]); 
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const connectedPeersRef = useRef<Set<string>>(new Set()); 
+
+  // Segmentation Refs
+  const segmentationRef = useRef<any>(null);
+  const isSegmentationProcessing = useRef(false);
+  const latestMaskRef = useRef<ImageBitmap | null>(null);
+  const offscreenCanvasRef = useRef<HTMLCanvasElement>(document.createElement('canvas')); // For mask processing
 
   // Sync active filter state to ref
   useEffect(() => {
@@ -122,7 +128,36 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
             localStreamRef.current = stream;
         }
 
-        // 4. Start Processing Loop
+        // 4. Initialize MediaPipe Selfie Segmentation
+        if ((window as any).SelfieSegmentation) {
+            const selfieSegmentation = new (window as any).SelfieSegmentation({locateFile: (file: string) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${file}`;
+            }});
+            
+            selfieSegmentation.setOptions({
+                modelSelection: 1, // 1 = landscape/faster, 0 = general
+                selfieMode: false, // We handle mirroring manually if needed
+            });
+
+            selfieSegmentation.onResults((results: any) => {
+                 // Store the mask for the drawing loop
+                 if (results.segmentationMask) {
+                     // Create ImageBitmap from the mask to use in canvas draw
+                     createImageBitmap(results.segmentationMask).then(bmp => {
+                         if (latestMaskRef.current) latestMaskRef.current.close();
+                         latestMaskRef.current = bmp;
+                         isSegmentationProcessing.current = false;
+                     });
+                 } else {
+                    isSegmentationProcessing.current = false;
+                 }
+            });
+            
+            segmentationRef.current = selfieSegmentation;
+            console.log("Selfie Segmentation Initialized");
+        }
+
+        // 5. Start Processing Loop
         if (requestRef.current) cancelAnimationFrame(requestRef.current);
         
         const loop = () => {
@@ -155,11 +190,12 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
       }
       if (peerRef.current) peerRef.current.destroy();
       if (recognitionRef.current) recognitionRef.current.stop();
+      if (segmentationRef.current) segmentationRef.current.close();
     };
   }, []);
 
   // --- Canvas Effect Loop ---
-  const processCanvasLoop = () => {
+  const processCanvasLoop = async () => {
     if (!canvasRef.current || !rawVideoRef.current) return;
     
     const ctx = canvasRef.current.getContext('2d');
@@ -176,11 +212,80 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
         const width = canvasRef.current.width;
         const height = canvasRef.current.height;
 
-        // 1. Draw Base Video
-        ctx.drawImage(video, 0, 0, width, height);
-        
-        // 2. Apply Active Filter using Ref to avoid stale state
-        applyFilterEffects(ctx, width, height);
+        const filter = activeFilterRef.current;
+
+        // --- SEGMENTATION PIPELINE ---
+        if (['blur-bg', 'virtual-office', 'virtual-sunset'].includes(filter) && segmentationRef.current) {
+             // 1. Trigger Model Inference if idle
+             if (!isSegmentationProcessing.current) {
+                 isSegmentationProcessing.current = true;
+                 try {
+                    await segmentationRef.current.send({image: video});
+                 } catch(e) {
+                    console.error("Segmentation send error", e);
+                    isSegmentationProcessing.current = false;
+                 }
+             }
+
+             // 2. Draw using Latest Mask
+             if (latestMaskRef.current) {
+                 ctx.save();
+                 ctx.clearRect(0, 0, width, height);
+                 
+                 // Step A: Draw the Mask
+                 // We want the person to be opaque, background transparent first?
+                 // Standard composite operation approach:
+                 
+                 // 1. Draw mask
+                 ctx.drawImage(latestMaskRef.current, 0, 0, width, height);
+                 
+                 // 2. 'source-in' : Keep only where mask is drawn (The Person)
+                 ctx.globalCompositeOperation = 'source-in';
+                 ctx.drawImage(video, 0, 0, width, height);
+
+                 // 3. 'destination-over' : Draw Background behind the person
+                 ctx.globalCompositeOperation = 'destination-over';
+                 
+                 if (filter === 'blur-bg') {
+                     // Draw blurred video as background
+                     ctx.filter = 'blur(15px)';
+                     ctx.drawImage(video, 0, 0, width, height);
+                     ctx.filter = 'none';
+                 } else if (filter === 'virtual-office') {
+                     // Virtual Office Gradient
+                     const grad = ctx.createLinearGradient(0,0,width,height);
+                     grad.addColorStop(0, '#1e293b');
+                     grad.addColorStop(1, '#0f172a');
+                     ctx.fillStyle = grad;
+                     ctx.fillRect(0,0,width,height);
+                     // Add some grid lines
+                     ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+                     ctx.lineWidth = 2;
+                     for(let i=0;i<width;i+=50) { ctx.beginPath(); ctx.moveTo(i,0); ctx.lineTo(i,height); ctx.stroke(); }
+                 } else if (filter === 'virtual-sunset') {
+                     // Sunset Gradient
+                     const grad = ctx.createLinearGradient(0,0,0,height);
+                     grad.addColorStop(0, '#4c1d95');
+                     grad.addColorStop(0.5, '#db2777');
+                     grad.addColorStop(1, '#fbbf24');
+                     ctx.fillStyle = grad;
+                     ctx.fillRect(0,0,width,height);
+                 }
+                 
+                 ctx.restore();
+             } else {
+                 // Fallback if mask not ready yet
+                 ctx.drawImage(video, 0, 0, width, height);
+             }
+
+        } else {
+            // --- STANDARD PIPELINE ---
+            // 1. Draw Base Video
+            ctx.drawImage(video, 0, 0, width, height);
+            
+            // 2. Apply Active Filter using Ref to avoid stale state
+            applyFilterEffects(ctx, width, height);
+        }
     }
   };
 
@@ -269,14 +374,7 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
               break;
 
           case 'blur':
-             // Privacy Blur (Pixelation)
-             const size = 15;
-             // We can't easily do full Gaussian blur in real-time on 2D context without big perf hit.
-             // Pixelation is a cool "Privacy" effect.
-             
-             // Create a temporary canvas or just draw small then scale up?
-             // Actually, a simple overlay pattern works too.
-             // Let's do a "Frosted Glass" simulation by drawing white with opacity
+             // Privacy Blur (Pixelation) - OLD FILTER (Renamed to Privacy in UI)
              ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
              ctx.fillRect(0, 0, width, height);
              ctx.font = '40px sans-serif';
@@ -289,9 +387,6 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
               // RGB Split / Glitch
               const offsetR = Math.sin(time / 200) * 10;
               const offsetG = Math.cos(time / 200) * 10;
-              
-              // We need to access image data to do this properly, which is slow.
-              // Fake it by drawing the video multiple times with composite operations.
               
               ctx.globalCompositeOperation = 'screen';
               
@@ -784,6 +879,9 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
                                    <div className="flex gap-2 overflow-x-auto pb-2 custom-scrollbar">
                                        {[
                                            { id: 'none', label: 'None', color: 'slate' },
+                                           { id: 'blur-bg', label: 'Blur BG', color: 'orange' },
+                                           { id: 'virtual-office', label: 'Office', color: 'blue' },
+                                           { id: 'virtual-sunset', label: 'Sunset', color: 'yellow' },
                                            { id: 'cyber', label: 'Holo', color: 'cyan' },
                                            { id: 'terminator', label: 'T-800', color: 'red' },
                                            { id: 'matrix', label: 'Matrix', color: 'green' },
@@ -937,6 +1035,9 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
                                    <div className="flex gap-2 custom-scrollbar">
                                        {[
                                            { id: 'none', label: 'None', color: 'slate' },
+                                           { id: 'blur-bg', label: 'Blur BG', color: 'orange' },
+                                           { id: 'virtual-office', label: 'Office', color: 'blue' },
+                                           { id: 'virtual-sunset', label: 'Sunset', color: 'yellow' },
                                            { id: 'cyber', label: 'Holo', color: 'cyan' },
                                            { id: 'terminator', label: 'T-800', color: 'red' },
                                            { id: 'matrix', label: 'Matrix', color: 'green' },
