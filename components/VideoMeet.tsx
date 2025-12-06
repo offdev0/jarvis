@@ -45,6 +45,9 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
   // Filter State
   const [activeFilter, setActiveFilter] = useState<FilterType>('none');
   const [showEffectsPanel, setShowEffectsPanel] = useState(false);
+  
+  // Use a ref for active filter to avoid stale closures in the animation loop
+  const activeFilterRef = useRef<FilterType>('none');
 
   // Chat State
   const [showChat, setShowChat] = useState(false);
@@ -69,6 +72,11 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
   const dataConnsRef = useRef<any[]>([]); 
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const connectedPeersRef = useRef<Set<string>>(new Set()); 
+
+  // Sync active filter state to ref
+  useEffect(() => {
+    activeFilterRef.current = activeFilter;
+  }, [activeFilter]);
 
   // --- Initialization & Media Pipeline ---
   useEffect(() => {
@@ -100,8 +108,9 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
 
         // 3. Set up Canvas Processing
         if (canvasRef.current) {
-            // Initialize canvas size based on video
-            // Wait a bit for metadata or just use loop to catch up
+            // Set initial dimensions
+            canvasRef.current.width = 1280;
+            canvasRef.current.height = 720;
             
             const stream = canvasRef.current.captureStream(30); // 30 FPS
             
@@ -115,7 +124,12 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
 
         // 4. Start Processing Loop
         if (requestRef.current) cancelAnimationFrame(requestRef.current);
-        requestRef.current = requestAnimationFrame(processCanvasLoop);
+        
+        const loop = () => {
+            processCanvasLoop();
+            requestRef.current = requestAnimationFrame(loop);
+        };
+        requestRef.current = requestAnimationFrame(loop);
         
         setStatusMsg("");
 
@@ -146,19 +160,17 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
 
   // --- Canvas Effect Loop ---
   const processCanvasLoop = () => {
-    if (!canvasRef.current || !rawVideoRef.current) {
-        requestRef.current = requestAnimationFrame(processCanvasLoop);
-        return;
-    }
+    if (!canvasRef.current || !rawVideoRef.current) return;
     
     const ctx = canvasRef.current.getContext('2d');
     const video = rawVideoRef.current;
     
-    if (ctx && video.readyState >= 2) { // HAVE_CURRENT_DATA
+    // Check if video is ready
+    if (ctx && video.readyState >= 2) { 
         // Match canvas size to video if changed
-        if (canvasRef.current.width !== video.videoWidth || canvasRef.current.height !== video.videoHeight) {
-             canvasRef.current.width = video.videoWidth || 640;
-             canvasRef.current.height = video.videoHeight || 480;
+        if (video.videoWidth > 0 && (canvasRef.current.width !== video.videoWidth || canvasRef.current.height !== video.videoHeight)) {
+             canvasRef.current.width = video.videoWidth;
+             canvasRef.current.height = video.videoHeight;
         }
         
         const width = canvasRef.current.width;
@@ -167,17 +179,16 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
         // 1. Draw Base Video
         ctx.drawImage(video, 0, 0, width, height);
         
-        // 2. Apply Active Filter
+        // 2. Apply Active Filter using Ref to avoid stale state
         applyFilterEffects(ctx, width, height);
     }
-
-    requestRef.current = requestAnimationFrame(processCanvasLoop);
   };
 
   const applyFilterEffects = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
       const time = Date.now();
+      const filter = activeFilterRef.current; // Read from Ref
 
-      switch (activeFilter) {
+      switch (filter) {
           case 'cyber':
               // Blue/Cyan Tint
               ctx.globalCompositeOperation = 'overlay';
