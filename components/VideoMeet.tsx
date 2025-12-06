@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as Icons from 'lucide-react';
+import { GoogleGenAI } from '@google/genai';
 
 interface VideoMeetProps {
   onLeave: () => void;
@@ -16,6 +17,12 @@ interface ChatMessage {
   text: string;
   timestamp: number;
   isSystem?: boolean;
+}
+
+interface TranscriptItem {
+  senderId: string;
+  text: string;
+  timestamp: number;
 }
 
 const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
@@ -38,6 +45,13 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [hasUnreadMsg, setHasUnreadMsg] = useState(false);
+
+  // Read AI / Transcription State
+  const [transcriptHistory, setTranscriptHistory] = useState<TranscriptItem[]>([]);
+  const [showAiSummary, setShowAiSummary] = useState(false);
+  const [aiSummaryText, setAiSummaryText] = useState('');
+  const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
+  const recognitionRef = useRef<any>(null);
 
   // Refs
   const peerRef = useRef<any>(null);
@@ -83,10 +97,13 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
       if (peerRef.current) {
         peerRef.current.destroy();
       }
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
     };
   }, []);
 
-  // Sync Video Ref - FIXED: Added isInCall dependency to re-attach stream on view switch
+  // Sync Video Ref
   useEffect(() => {
     localStreamRef.current = localStream;
     if (localVideoRef.current && localStream) {
@@ -94,6 +111,53 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
        localVideoRef.current.play().catch(e => console.log('Autoplay blocked:', e));
     }
   }, [localStream, isInCall]);
+
+  // --- Speech Recognition Setup (Read AI) ---
+  useEffect(() => {
+    if (isInCall && !recognitionRef.current) {
+        if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+            const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+            const recognition = new SpeechRecognition();
+            recognition.continuous = true;
+            recognition.interimResults = false; // Only send final results to reduce noise
+            recognition.lang = 'en-US';
+
+            recognition.onresult = (event: any) => {
+                const lastResultIndex = event.results.length - 1;
+                const transcript = event.results[lastResultIndex][0].transcript;
+                
+                if (transcript.trim()) {
+                    const item: TranscriptItem = {
+                        senderId: peerId || 'Me',
+                        text: transcript,
+                        timestamp: Date.now()
+                    };
+                    
+                    // 1. Add to local history
+                    setTranscriptHistory(prev => [...prev, item]);
+
+                    // 2. Broadcast to peers
+                    broadcastData({ type: 'transcript', payload: item });
+                }
+            };
+            
+            // Auto-restart if it stops unexpectedly
+            recognition.onend = () => {
+                if (isInCall) {
+                    try { recognition.start(); } catch(e) {}
+                }
+            };
+
+            try {
+                recognition.start();
+                recognitionRef.current = recognition;
+            } catch (e) {
+                console.error("Speech Rec start failed", e);
+            }
+        }
+    }
+  }, [isInCall, peerId]);
+
 
   // --- Mesh Network Logic ---
 
@@ -161,11 +225,6 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
       // Connect to Host for discovery
       const conn = peer.connect(roomId);
       setupDataConnection(conn);
-
-      // Listen for 'welcome' message from Host containing peer list
-      conn.on('open', () => {
-         // Maybe send a 'hello'? Host should auto-send welcome on connection
-      });
     });
 
     peer.on('error', (err: any) => {
@@ -187,8 +246,6 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
        conn.on('open', () => {
           // Send current list (including myself) to the new user
           const peersList = Array.from(connectedPeersRef.current);
-          // Add host (me) to list if not present, though guest handles connecting to me via this connection
-          // Actually, Guest needs to call Me (Media).
           
           conn.send({
              type: 'room-info',
@@ -206,11 +263,8 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
   const setupCommonPeerEvents = (peer: any) => {
     // Handle Incoming Media Calls
     peer.on('call', (call: any) => {
-      console.log('Incoming call from:', call.peer);
       call.answer(localStreamRef.current); // Answer with audio/video
       callsRef.current.push(call);
-      
-      // Subscribe to all health events
       subscribeToCallEvents(call);
     });
 
@@ -220,7 +274,6 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
     });
   };
 
-  // 4.5 Robust Call Event Subscription (Centralized logic for cleanup)
   const subscribeToCallEvents = (call: any) => {
       call.on('stream', (remoteStream: MediaStream) => {
         handleRemoteStream(call.peer, remoteStream);
@@ -228,21 +281,18 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
 
       // Standard Close
       call.on('close', () => {
-          console.log('Call closed:', call.peer);
           removePeer(call.peer);
       });
       
       call.on('error', (err: any) => {
-          console.error('Call error:', err);
           removePeer(call.peer);
       });
 
-      // ICE State Monitoring (Critical for detecting tab closures)
+      // ICE State Monitoring
       if (call.peerConnection) {
           call.peerConnection.oniceconnectionstatechange = () => {
               const state = call.peerConnection.iceConnectionState;
               if (state === 'disconnected' || state === 'failed' || state === 'closed') {
-                  console.log(`Peer ${call.peer} ICE state: ${state} -> removing`);
                   removePeer(call.peer);
               }
           };
@@ -260,16 +310,14 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
         if (!showChat) setHasUnreadMsg(true);
       }
 
+      // Handle Transcript (Read AI)
+      if (data.type === 'transcript') {
+         setTranscriptHistory(prev => [...prev, data.payload]);
+      }
+
       // Handle Signaling (Guest receiving peer list)
       if (data.type === 'room-info' && data.peers) {
-         // I am a guest, and I just got the list of other people in the room.
-         // I need to connect to all of them.
-         console.log('Received peer list:', data.peers);
          connectToPeers(data.peers);
-         
-         // Also call the sender (Host) if not already calling?
-         // Note: We are already connected via Data to Host (conn).
-         // We need to initiate Media call to Host.
          initiateMediaCall(conn.peer);
       }
     });
@@ -277,7 +325,6 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
     conn.on('close', () => removePeer(conn.peer));
     conn.on('error', () => removePeer(conn.peer));
 
-    // Monitor Data ICE state too
     if (conn.peerConnection) {
        conn.peerConnection.oniceconnectionstatechange = () => {
           const state = conn.peerConnection.iceConnectionState;
@@ -288,32 +335,33 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
     }
   };
 
+  const broadcastData = (data: any) => {
+      dataConnsRef.current.forEach(conn => {
+          if (conn.open) {
+              conn.send(data);
+          }
+      });
+  };
+
   // 6. Connect to Mesh (Guest Logic)
   const connectToPeers = (peers: string[]) => {
      peers.forEach(targetId => {
-         // Don't connect to self
          if (targetId === peerId) return;
-         // Check if already connected
          if (callsRef.current.find(c => c.peer === targetId)) return;
 
-         // Connect Data
          const conn = peerRef.current.connect(targetId);
          setupDataConnection(conn);
 
-         // Connect Media
          initiateMediaCall(targetId);
      });
   };
 
   const initiateMediaCall = (targetId: string) => {
      if (!localStreamRef.current) return;
-     // Check if call exists
      if (callsRef.current.find(c => c.peer === targetId)) return;
 
-     console.log('Calling:', targetId);
      const call = peerRef.current.call(targetId, localStreamRef.current);
      callsRef.current.push(call);
-
      subscribeToCallEvents(call);
   };
 
@@ -325,7 +373,6 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
   };
 
   const removePeer = (id: string) => {
-    console.log(`Removing peer: ${id}`);
     setRemoteStreams(prev => prev.filter(p => p.peerId !== id));
     callsRef.current = callsRef.current.filter(c => c.peer !== id);
     dataConnsRef.current = dataConnsRef.current.filter(c => c.peer !== id);
@@ -336,6 +383,52 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
 
   // --- Features ---
   
+  const generateMeetingSummary = async () => {
+     if (transcriptHistory.length === 0) {
+         setAiSummaryText("No transcription data available to summarize.");
+         return;
+     }
+
+     setIsGeneratingSummary(true);
+     setAiSummaryText("");
+     
+     try {
+         // Follow guideline: process.env.API_KEY directly
+         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+         // Format transcript
+         const fullTranscript = transcriptHistory
+            .map(t => `[${new Date(t.timestamp).toLocaleTimeString()} - ${t.senderId}]: ${t.text}`)
+            .join('\n');
+
+         const prompt = `
+            You are 'Read AI', an intelligent meeting secretary. 
+            Analyze the following meeting transcript and generate a structured report containing:
+            1. 📝 Executive Summary (2-3 sentences)
+            2. ✅ Key Action Items (Bulleted list with assignees if mentioned)
+            3. 📋 Detailed Notes (Grouped by topic)
+
+            TRANSCRIPT:
+            ${fullTranscript}
+         `;
+
+         // Use correct API for new SDK
+         const result = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: prompt
+         });
+         
+         // Use correct property .text
+         setAiSummaryText(result.text || "No summary generated.");
+
+     } catch (e) {
+         console.error("AI Summary Gen failed", e);
+         setAiSummaryText("Failed to generate summary. Please try again.");
+     } finally {
+         setIsGeneratingSummary(false);
+     }
+  };
+
   const stopScreenSharing = async () => {
     try {
       if (localStreamRef.current) {
@@ -406,14 +499,7 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
     };
 
     setChatMessages(prev => [...prev, msg]);
-    
-    // Broadcast to ALL connected peers (Mesh)
-    dataConnsRef.current.forEach(conn => {
-       if (conn.open) {
-         conn.send({ type: 'chat', payload: msg });
-       }
-    });
-
+    broadcastData({ type: 'chat', payload: msg });
     setChatInput("");
   };
 
@@ -467,7 +553,14 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
              <div className={`w-2 h-2 rounded-full ${isInCall ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
              {isInCall ? 'Encrypted Mesh' : 'Offline'}
            </div>
-           <span className="font-mono text-xs text-slate-400 hidden md:inline">{new Date().toLocaleTimeString([], { hour: '2-digit', minute:'2-digit' })}</span>
+           
+           {/* READ AI STATUS */}
+           {isInCall && (
+               <div className="hidden md:flex items-center gap-2 px-3 py-1 bg-indigo-500/10 border border-indigo-500/30 rounded-full">
+                  <Icons.Bot className="w-3 h-3 text-indigo-400" />
+                  <span className="text-[10px] font-mono text-indigo-300">READ AI LISTENING</span>
+               </div>
+           )}
         </div>
       </div>
 
@@ -563,6 +656,17 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
                 /* ACTIVE CALL GRID */
                 <div className="flex-1 flex flex-col gap-4 relative z-10 w-full h-full">
                    
+                   {/* Live Transcript Ticker Overlay */}
+                   {transcriptHistory.length > 0 && (
+                       <div className="absolute top-4 left-4 right-4 z-20 pointer-events-none">
+                           <div className="max-w-2xl mx-auto bg-black/60 backdrop-blur-md rounded-full px-6 py-2 border border-white/10 flex items-center gap-3 animate-in fade-in slide-in-from-top-2">
+                               <div className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></div>
+                               <span className="text-[10px] font-mono text-indigo-300 whitespace-nowrap">{transcriptHistory[transcriptHistory.length - 1].senderId.substring(0,8)}:</span>
+                               <span className="text-sm text-white truncate font-medium">{transcriptHistory[transcriptHistory.length - 1].text}</span>
+                           </div>
+                       </div>
+                   )}
+
                    <div className="flex-1 overflow-y-auto min-h-0 custom-scrollbar p-2">
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 auto-rows-[minmax(200px,1fr)]">
                         {/* Local Video */}
@@ -630,6 +734,19 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
                             {hasUnreadMsg && <span className="absolute top-0 right-0 w-3 h-3 bg-red-500 rounded-full border-2 border-slate-900"></span>}
                          </button>
 
+                         {/* READ AI BUTTON */}
+                         <button 
+                           onClick={() => {
+                               setShowAiSummary(true);
+                               generateMeetingSummary();
+                           }}
+                           className="flex items-center gap-2 px-4 py-3 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold transition-all ml-2"
+                           title="Generate Meeting Notes"
+                         >
+                            <Icons.Sparkles size={18} />
+                            <span className="hidden md:inline text-sm">Read AI</span>
+                         </button>
+
                          <div className="w-[1px] h-8 bg-slate-700 mx-2"></div>
 
                          <button 
@@ -645,6 +762,69 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
                 </div>
              )}
         </div>
+
+        {/* Read AI Summary Modal / Slide-over */}
+        {showAiSummary && (
+             <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-md flex justify-end">
+                <div className="w-full max-w-lg bg-slate-900 h-full border-l border-indigo-500/30 flex flex-col animate-in slide-in-from-right duration-300">
+                    <div className="p-6 border-b border-white/10 flex justify-between items-center bg-indigo-950/30">
+                        <div className="flex items-center gap-3">
+                             <div className="p-2 bg-indigo-500/20 rounded-lg">
+                                 <Icons.Bot className="w-6 h-6 text-indigo-400" />
+                             </div>
+                             <div>
+                                 <h2 className="text-xl font-display font-bold text-white">Read AI</h2>
+                                 <p className="text-xs text-indigo-300 font-mono">INTELLIGENT MEETING NOTES</p>
+                             </div>
+                        </div>
+                        <button onClick={() => setShowAiSummary(false)} className="text-slate-400 hover:text-white">
+                            <Icons.X size={24} />
+                        </button>
+                    </div>
+                    
+                    <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                        {isGeneratingSummary ? (
+                            <div className="flex flex-col items-center justify-center h-64 gap-4">
+                                <Icons.Loader2 className="w-12 h-12 text-indigo-500 animate-spin" />
+                                <p className="text-sm font-mono text-indigo-300 animate-pulse">ANALYZING AUDIO STREAMS...</p>
+                            </div>
+                        ) : (
+                            <div className="prose prose-invert prose-indigo max-w-none">
+                                {aiSummaryText ? (
+                                    <div className="whitespace-pre-wrap">{aiSummaryText}</div>
+                                ) : (
+                                    <p className="text-slate-500 italic">No summary generated yet.</p>
+                                )}
+                            </div>
+                        )}
+                        
+                        {/* Transcript Raw Log */}
+                        <div className="mt-8 pt-8 border-t border-white/10">
+                            <h3 className="text-sm font-bold text-slate-300 uppercase tracking-wider mb-4">Raw Transcript</h3>
+                            <div className="space-y-2 text-xs font-mono text-slate-400 max-h-64 overflow-y-auto bg-black/30 p-4 rounded-lg">
+                                {transcriptHistory.map((t, i) => (
+                                    <div key={i}>
+                                        <span className="text-indigo-400">[{new Date(t.timestamp).toLocaleTimeString()}] {t.senderId}:</span> {t.text}
+                                    </div>
+                                ))}
+                                {transcriptHistory.length === 0 && <div>Waiting for speech...</div>}
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div className="p-4 border-t border-white/10 bg-black/20">
+                         <button 
+                            onClick={generateMeetingSummary} 
+                            disabled={isGeneratingSummary}
+                            className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-white font-bold flex items-center justify-center gap-2"
+                         >
+                            <Icons.RefreshCw size={16} className={isGeneratingSummary ? 'animate-spin' : ''} />
+                            Regenerate Summary
+                         </button>
+                    </div>
+                </div>
+             </div>
+        )}
 
         {/* Right: Chat Sidebar */}
         <div className={`transition-all duration-300 ease-in-out border-l border-slate-800 bg-slate-900/95 backdrop-blur-xl flex flex-col ${showChat ? 'w-80 translate-x-0' : 'w-0 translate-x-full opacity-0 overflow-hidden'}`}>
@@ -712,7 +892,7 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
 };
 
 // Helper component
-const VideoFrame = ({ stream, peerId }: { stream: MediaStream, peerId: string }) => {
+const VideoFrame: React.FC<{ stream: MediaStream; peerId: string }> = ({ stream, peerId }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isMuted, setIsMuted] = useState(false);
 

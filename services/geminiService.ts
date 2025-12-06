@@ -2,34 +2,14 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { AGENTS } from '../constants';
 import { AgentId, RoutingResult } from '../types';
 
-// Safely access API key to prevent "process is not defined" crashes in pure browser environments
-const getApiKey = () => {
-  try {
-    if (typeof process !== 'undefined' && process.env && process.env.API_KEY) {
-      return process.env.API_KEY;
-    }
-  } catch (e) {
-    // Ignore error
-  }
-  return '';
-};
-
-const apiKey = getApiKey();
-if (!apiKey) {
-  console.error("API_KEY is missing. The app will fail to generate content.");
-}
-
-// Initialize AI only if key exists to prevent immediate constructor error, 
-// though we handle errors in functions.
-const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
+// Initialize AI client using the environment variable directly.
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 /**
  * The "Brain" Logic - Step 1: Routing
  * Decides which agent should handle the request based on keywords and context.
  */
 export const routeRequest = async (userPrompt: string): Promise<RoutingResult> => {
-  if (!ai) return { targetAgentId: AgentId.MASTER, reasoning: "API Key missing" };
-
   const model = 'gemini-2.5-flash';
 
   const routerSystemPrompt = `
@@ -101,8 +81,6 @@ export const generateAgentResponse = async (
   base64Image?: string,
   mimeType?: string
 ): Promise<{ text: string; generatedImageUrl?: string }> => {
-  if (!ai) return { text: "System Error: API Configuration Invalid." };
-
   const agentConfig = AGENTS[agentId];
   
   // Decide which model to use
