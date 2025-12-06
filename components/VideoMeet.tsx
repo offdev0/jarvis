@@ -45,6 +45,7 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
   // Filter State
   const [activeFilter, setActiveFilter] = useState<FilterType>('none');
   const [showEffectsPanel, setShowEffectsPanel] = useState(false);
+  const [effectCategory, setEffectCategory] = useState<'overlay' | 'background'>('overlay');
   
   // Use a ref for active filter to avoid stale closures in the animation loop
   const activeFilterRef = useRef<FilterType>('none');
@@ -136,7 +137,7 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
             
             selfieSegmentation.setOptions({
                 modelSelection: 1, // 1 = landscape/faster, 0 = general
-                selfieMode: false, // We handle mirroring manually if needed
+                selfieMode: false, 
             });
 
             selfieSegmentation.onResults((results: any) => {
@@ -144,8 +145,13 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
                  if (results.segmentationMask) {
                      // Create ImageBitmap from the mask to use in canvas draw
                      createImageBitmap(results.segmentationMask).then(bmp => {
-                         if (latestMaskRef.current) latestMaskRef.current.close();
+                         // We don't close the old one immediately to prevent flickering, 
+                         // we swap then close, or let GC handle if close() is problematic in race conditions.
+                         // Best practice: Close previous if it exists.
+                         const oldMask = latestMaskRef.current;
                          latestMaskRef.current = bmp;
+                         if (oldMask) oldMask.close();
+                         
                          isSegmentationProcessing.current = false;
                      });
                  } else {
@@ -155,6 +161,8 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
             
             segmentationRef.current = selfieSegmentation;
             console.log("Selfie Segmentation Initialized");
+        } else {
+            console.warn("MediaPipe SelfieSegmentation not found in window");
         }
 
         // 5. Start Processing Loop
@@ -191,6 +199,7 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
       if (peerRef.current) peerRef.current.destroy();
       if (recognitionRef.current) recognitionRef.current.stop();
       if (segmentationRef.current) segmentationRef.current.close();
+      if (latestMaskRef.current) latestMaskRef.current.close();
     };
   }, []);
 
@@ -198,7 +207,7 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
   const processCanvasLoop = async () => {
     if (!canvasRef.current || !rawVideoRef.current) return;
     
-    const ctx = canvasRef.current.getContext('2d');
+    const ctx = canvasRef.current.getContext('2d', { alpha: false }); // alpha: false for performance
     const video = rawVideoRef.current;
     
     // Check if video is ready
@@ -211,15 +220,16 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
         
         const width = canvasRef.current.width;
         const height = canvasRef.current.height;
-
         const filter = activeFilterRef.current;
 
-        // --- SEGMENTATION PIPELINE ---
+        // --- SEGMENTATION PIPELINE (Background Replacement/Blur) ---
         if (['blur-bg', 'virtual-office', 'virtual-sunset'].includes(filter) && segmentationRef.current) {
+             
              // 1. Trigger Model Inference if idle
              if (!isSegmentationProcessing.current) {
                  isSegmentationProcessing.current = true;
                  try {
+                    // Send video frame to MediaPipe
                     await segmentationRef.current.send({image: video});
                  } catch(e) {
                     console.error("Segmentation send error", e);
@@ -232,58 +242,77 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
                  ctx.save();
                  ctx.clearRect(0, 0, width, height);
                  
-                 // Step A: Draw the Mask
-                 // We want the person to be opaque, background transparent first?
-                 // Standard composite operation approach:
-                 
-                 // 1. Draw mask
+                 // Step A: Draw the Mask (Person Shape)
                  ctx.drawImage(latestMaskRef.current, 0, 0, width, height);
                  
-                 // 2. 'source-in' : Keep only where mask is drawn (The Person)
+                 // Step B: Composite 'source-in' 
+                 // This keeps the source (Video) ONLY where the destination (Mask) is opaque.
+                 // Result: Floating person on transparent background.
                  ctx.globalCompositeOperation = 'source-in';
                  ctx.drawImage(video, 0, 0, width, height);
 
-                 // 3. 'destination-over' : Draw Background behind the person
+                 // Step C: Composite 'destination-over'
+                 // This draws new content BEHIND the existing content (the floating person).
                  ctx.globalCompositeOperation = 'destination-over';
                  
                  if (filter === 'blur-bg') {
-                     // Draw blurred video as background
-                     ctx.filter = 'blur(15px)';
-                     ctx.drawImage(video, 0, 0, width, height);
-                     ctx.filter = 'none';
-                 } else if (filter === 'virtual-office') {
+                     // Performance Optimization: 
+                     // Drawing a full res video with ctx.filter='blur(15px)' is very slow.
+                     // Instead, draw the video small (downscale) then draw it big (upscale).
+                     // This creates a natural, cheap blur.
+                     const blurAmount = 40; // Scale factor divisor
+                     ctx.drawImage(video, 0, 0, width / blurAmount, height / blurAmount); // Draw tiny
+                     ctx.drawImage(canvasRef.current, 0, 0, width / blurAmount, height / blurAmount, 0, 0, width, height); // Scale up
+                     
+                     // Add a slight dark tint for "focus"
+                     ctx.fillStyle = 'rgba(0,0,0,0.2)';
+                     ctx.fillRect(0,0,width,height);
+                 } 
+                 else if (filter === 'virtual-office') {
                      // Virtual Office Gradient
                      const grad = ctx.createLinearGradient(0,0,width,height);
-                     grad.addColorStop(0, '#1e293b');
-                     grad.addColorStop(1, '#0f172a');
+                     grad.addColorStop(0, '#1e293b'); // Dark Slate
+                     grad.addColorStop(0.5, '#334155'); // Mid Slate
+                     grad.addColorStop(1, '#0f172a'); // Deep Dark
                      ctx.fillStyle = grad;
                      ctx.fillRect(0,0,width,height);
-                     // Add some grid lines
-                     ctx.strokeStyle = 'rgba(255,255,255,0.05)';
-                     ctx.lineWidth = 2;
-                     for(let i=0;i<width;i+=50) { ctx.beginPath(); ctx.moveTo(i,0); ctx.lineTo(i,height); ctx.stroke(); }
-                 } else if (filter === 'virtual-sunset') {
+                     
+                     // Grid lines floor
+                     ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+                     ctx.lineWidth = 1;
+                     for(let i=0;i<height;i+=20) { 
+                        ctx.beginPath(); ctx.moveTo(0,i); ctx.lineTo(width,i); ctx.stroke(); 
+                     }
+                 } 
+                 else if (filter === 'virtual-sunset') {
                      // Sunset Gradient
                      const grad = ctx.createLinearGradient(0,0,0,height);
-                     grad.addColorStop(0, '#4c1d95');
-                     grad.addColorStop(0.5, '#db2777');
-                     grad.addColorStop(1, '#fbbf24');
+                     grad.addColorStop(0, '#4c1d95'); // Deep Purple
+                     grad.addColorStop(0.4, '#db2777'); // Pink
+                     grad.addColorStop(0.8, '#f59e0b'); // Orange
+                     grad.addColorStop(1, '#fbbf24'); // Yellow
                      ctx.fillStyle = grad;
                      ctx.fillRect(0,0,width,height);
+                     
+                     // Sun
+                     ctx.fillStyle = 'rgba(255, 200, 0, 0.2)';
+                     ctx.beginPath();
+                     ctx.arc(width/2, height, height/3, 0, Math.PI, true);
+                     ctx.fill();
                  }
                  
                  ctx.restore();
              } else {
-                 // Fallback if mask not ready yet
+                 // Fallback if mask not ready yet (e.g. first few frames)
                  ctx.drawImage(video, 0, 0, width, height);
              }
 
         } else {
-            // --- STANDARD PIPELINE ---
+            // --- STANDARD PIPELINE (Overlays) ---
             // 1. Draw Base Video
             ctx.drawImage(video, 0, 0, width, height);
             
-            // 2. Apply Active Filter using Ref to avoid stale state
+            // 2. Apply Active Filter
             applyFilterEffects(ctx, width, height);
         }
     }
@@ -759,13 +788,27 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
 
   // --- Render ---
 
+  // DEFINING FILTER LISTS FOR UI
+  const overlays = [
+    { id: 'none', label: 'None', icon: Icons.XCircle, color: 'slate' },
+    { id: 'cyber', label: 'Holo', icon: Icons.Cpu, color: 'cyan' },
+    { id: 'terminator', label: 'T-800', icon: Icons.Crosshair, color: 'red' },
+    { id: 'matrix', label: 'Matrix', icon: Icons.Code, color: 'green' },
+    { id: 'rgb', label: 'Glitch', icon: Icons.Zap, color: 'pink' },
+    { id: 'starfield', label: 'Space', icon: Icons.Stars, color: 'indigo' },
+    { id: 'blur', label: 'Privacy', icon: Icons.EyeOff, color: 'white' },
+    { id: 'mono', label: 'B&W', icon: Icons.Aperture, color: 'gray' }
+  ];
+
+  const backgrounds = [
+    { id: 'blur-bg', label: 'Blur BG', icon: Icons.Droplets, color: 'orange' },
+    { id: 'virtual-office', label: 'Office', icon: Icons.Building2, color: 'blue' },
+    { id: 'virtual-sunset', label: 'Sunset', icon: Icons.Sun, color: 'yellow' },
+  ];
+
   return (
     <div className="flex flex-col h-full bg-[#0a0f16] relative overflow-hidden animate-in fade-in zoom-in-95 duration-500">
       
-      {/* HIDDEN RAW VIDEO (Source for Canvas) */}
-      {/* We don't render this, but keep it in DOM just in case, or use ref directly. 
-          Actually useRef does not need DOM attachment for video processing usually, 
-          but attaching it helps debugging. Hidden. */}
       {/* Canvas for processing */}
       <canvas ref={canvasRef} className="hidden" />
 
@@ -868,39 +911,6 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
                                      </button>
                                 </div>
                             </div>
-                            
-                            {/* Effects Panel */}
-                            {showEffectsPanel && (
-                                <div className="absolute -bottom-24 left-0 right-0 bg-[#0a0f16] border border-slate-700 rounded-xl p-4 shadow-xl z-30 animate-in slide-in-from-top-2">
-                                   <div className="flex justify-between items-center mb-2">
-                                       <span className="text-xs font-mono uppercase text-slate-400">Visual Augmentation</span>
-                                       <button onClick={() => setShowEffectsPanel(false)}><Icons.X size={14} /></button>
-                                   </div>
-                                   <div className="flex gap-2 overflow-x-auto pb-2 custom-scrollbar">
-                                       {[
-                                           { id: 'none', label: 'None', color: 'slate' },
-                                           { id: 'blur-bg', label: 'Blur BG', color: 'orange' },
-                                           { id: 'virtual-office', label: 'Office', color: 'blue' },
-                                           { id: 'virtual-sunset', label: 'Sunset', color: 'yellow' },
-                                           { id: 'cyber', label: 'Holo', color: 'cyan' },
-                                           { id: 'terminator', label: 'T-800', color: 'red' },
-                                           { id: 'matrix', label: 'Matrix', color: 'green' },
-                                           { id: 'rgb', label: 'Glitch', color: 'pink' },
-                                           { id: 'starfield', label: 'Space', color: 'indigo' },
-                                           { id: 'blur', label: 'Privacy', color: 'white' },
-                                           { id: 'mono', label: 'B&W', color: 'gray' }
-                                       ].map((filter) => (
-                                           <button
-                                               key={filter.id}
-                                               onClick={() => setActiveFilter(filter.id as FilterType)}
-                                               className={`px-3 py-2 rounded text-xs font-bold border transition-all whitespace-nowrap ${activeFilter === filter.id ? `bg-${filter.color}-500/20 border-${filter.color}-500 text-${filter.color}-400` : 'border-slate-700 text-slate-500 hover:border-slate-500'}`}
-                                           >
-                                               {filter.label}
-                                           </button>
-                                       ))}
-                                   </div>
-                                </div>
-                            )}
                         </div>
 
                         {/* RIGHT: Login Form */}
@@ -1031,29 +1041,47 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
                          
                          {/* Effects Popup (When active in call) */}
                          {showEffectsPanel && (
-                                <div className="absolute bottom-20 left-1/2 -translate-x-1/2 bg-[#0a0f16] border border-slate-700 rounded-xl p-3 shadow-xl z-30 animate-in slide-in-from-bottom-2 w-max max-w-[90vw] overflow-x-auto">
-                                   <div className="flex gap-2 custom-scrollbar">
-                                       {[
-                                           { id: 'none', label: 'None', color: 'slate' },
-                                           { id: 'blur-bg', label: 'Blur BG', color: 'orange' },
-                                           { id: 'virtual-office', label: 'Office', color: 'blue' },
-                                           { id: 'virtual-sunset', label: 'Sunset', color: 'yellow' },
-                                           { id: 'cyber', label: 'Holo', color: 'cyan' },
-                                           { id: 'terminator', label: 'T-800', color: 'red' },
-                                           { id: 'matrix', label: 'Matrix', color: 'green' },
-                                           { id: 'rgb', label: 'Glitch', color: 'pink' },
-                                           { id: 'starfield', label: 'Space', color: 'indigo' },
-                                           { id: 'blur', label: 'Privacy', color: 'white' },
-                                           { id: 'mono', label: 'B&W', color: 'gray' }
-                                       ].map((filter) => (
-                                           <button
-                                               key={filter.id}
-                                               onClick={() => setActiveFilter(filter.id as FilterType)}
-                                               className={`px-3 py-2 rounded text-xs font-bold border transition-all whitespace-nowrap ${activeFilter === filter.id ? `bg-${filter.color}-500/20 border-${filter.color}-500 text-${filter.color}-400` : 'border-slate-700 text-slate-500 hover:border-slate-500'}`}
+                                <div className="absolute bottom-24 right-0 w-80 bg-[#0a0f16]/95 backdrop-blur-xl border border-slate-700 rounded-2xl shadow-2xl z-30 animate-in slide-in-from-bottom-5">
+                                   <div className="p-4 border-b border-white/10 flex justify-between items-center bg-black/40 rounded-t-2xl">
+                                       <div className="flex items-center gap-2">
+                                           <Icons.Wand2 size={16} className="text-purple-400" />
+                                           <span className="text-xs font-mono uppercase text-slate-200 font-bold tracking-wider">Visual Augmentation</span>
+                                       </div>
+                                       <button onClick={() => setShowEffectsPanel(false)} className="text-slate-400 hover:text-white"><Icons.X size={16} /></button>
+                                   </div>
+                                   
+                                   <div className="p-4">
+                                       <div className="flex gap-1 mb-4 bg-slate-900/50 p-1 rounded-lg">
+                                           <button 
+                                                onClick={() => setEffectCategory('overlay')}
+                                                className={`flex-1 py-1.5 text-[10px] font-bold uppercase rounded-md transition-all ${effectCategory === 'overlay' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-500 hover:text-slate-300'}`}
                                            >
-                                               {filter.label}
+                                               Holo-Overlays
                                            </button>
-                                       ))}
+                                           <button 
+                                                onClick={() => setEffectCategory('background')}
+                                                className={`flex-1 py-1.5 text-[10px] font-bold uppercase rounded-md transition-all ${effectCategory === 'background' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-500 hover:text-slate-300'}`}
+                                           >
+                                               Environment
+                                           </button>
+                                       </div>
+
+                                       <div className="grid grid-cols-4 gap-2">
+                                           {(effectCategory === 'overlay' ? overlays : backgrounds).map((filter) => (
+                                               <button
+                                                   key={filter.id}
+                                                   onClick={() => setActiveFilter(filter.id as FilterType)}
+                                                   className={`flex flex-col items-center gap-1 p-2 rounded-xl border transition-all duration-300 group ${activeFilter === filter.id ? `bg-${filter.color}-500/20 border-${filter.color}-500 shadow-[0_0_10px_rgba(0,0,0,0.2)]` : 'bg-slate-800/50 border-transparent hover:bg-slate-700 hover:border-slate-600'}`}
+                                               >
+                                                   <div className={`p-2 rounded-lg mb-1 transition-transform group-hover:scale-110 ${activeFilter === filter.id ? `bg-${filter.color}-500 text-white` : 'bg-slate-900 text-slate-400'}`}>
+                                                       <filter.icon size={16} />
+                                                   </div>
+                                                   <span className={`text-[9px] font-mono uppercase tracking-tight ${activeFilter === filter.id ? 'text-white font-bold' : 'text-slate-500'}`}>
+                                                       {filter.label}
+                                                   </span>
+                                               </button>
+                                           ))}
+                                       </div>
                                    </div>
                                 </div>
                          )}
@@ -1076,7 +1104,7 @@ const VideoMeet: React.FC<VideoMeetProps> = ({ onLeave }) => {
                          
                          <button 
                             onClick={() => setShowEffectsPanel(!showEffectsPanel)}
-                            className={`p-3 rounded-full transition-all ${showEffectsPanel ? 'bg-purple-500 text-white' : 'bg-slate-700 text-slate-200 hover:bg-purple-500/50'}`}
+                            className={`p-3 rounded-full transition-all ${showEffectsPanel ? 'bg-purple-500 text-white shadow-[0_0_15px_rgba(168,85,247,0.5)]' : 'bg-slate-700 text-slate-200 hover:bg-purple-500/50'}`}
                             title="Visual Effects"
                          >
                              <Icons.Wand2 size={20} />
