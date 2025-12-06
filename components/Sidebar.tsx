@@ -16,8 +16,9 @@ const Sidebar: React.FC<SidebarProps> = ({ currentAgent, onSelectAgent, isOpen }
       {/* Sidebar Header */}
       <div className="h-24 flex items-center px-8 border-b border-slate-800/50 bg-black/40">
          <div className="flex items-center gap-4">
-             <div className="relative w-10 h-10 flex items-center justify-center bg-gradient-to-br from-cyan-500 to-blue-600 rounded-lg shadow-lg shadow-cyan-500/20">
-                 <Icons.Cpu className="text-white w-6 h-6" />
+             <div className="relative w-10 h-10 flex items-center justify-center bg-gradient-to-br from-cyan-500 to-blue-600 rounded-lg shadow-lg shadow-cyan-500/20 group cursor-pointer overflow-hidden">
+                 <div className="absolute inset-0 bg-white/20 translate-y-full group-hover:translate-y-0 transition-transform duration-500"></div>
+                 <Icons.Cpu className="text-white w-6 h-6 relative z-10" />
              </div>
              <div>
                 <h1 className="text-white font-display font-bold tracking-widest text-xl">JARVIS</h1>
@@ -26,17 +27,19 @@ const Sidebar: React.FC<SidebarProps> = ({ currentAgent, onSelectAgent, isOpen }
          </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-5 space-y-8">
+      <div className="flex-1 overflow-y-auto p-5 space-y-8 custom-scrollbar">
         
         {/* Connection Status Mockup */}
-        <div className="p-4 border border-slate-800/80 rounded-lg bg-slate-900/30 backdrop-blur-sm shadow-inner relative overflow-hidden group">
+        <div className="p-4 border border-slate-800/80 rounded-lg bg-slate-900/30 backdrop-blur-sm shadow-inner relative overflow-hidden group cursor-default">
             <div className="absolute inset-0 bg-cyan-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
             <div className="flex justify-between items-center mb-3 relative z-10">
-                <span className="text-[10px] font-mono text-slate-400 font-bold tracking-wider">SYSTEM LOAD</span>
+                <span className="text-[10px] font-mono text-slate-400 font-bold tracking-wider group-hover:text-cyan-400 transition-colors">SYSTEM LOAD</span>
                 <span className="text-[10px] font-mono text-cyan-400 animate-pulse">34%</span>
             </div>
             <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden relative z-10">
-                <div className="w-[34%] h-full bg-gradient-to-r from-cyan-500 to-blue-500 shadow-[0_0_10px_rgba(6,182,212,0.5)]"></div>
+                <div className="w-[34%] h-full bg-gradient-to-r from-cyan-500 to-blue-500 shadow-[0_0_10px_rgba(6,182,212,0.5)] relative">
+                    <div className="absolute inset-0 bg-white/20 animate-[shimmer_2s_infinite]"></div>
+                </div>
             </div>
         </div>
 
@@ -51,7 +54,7 @@ const Sidebar: React.FC<SidebarProps> = ({ currentAgent, onSelectAgent, isOpen }
             {Object.values(AGENTS).map((agent) => {
               // Robustly resolve the icon component
               const iconName = agent.icon;
-              const IconComponent = (Icons as any)[iconName] || Icons.Circle || (() => <div className="w-4 h-4 bg-gray-500" />);
+              const IconComponent = (Icons as any)[iconName] || Icons.Circle;
               
               const isActive = currentAgent === agent.id;
               
@@ -62,27 +65,33 @@ const Sidebar: React.FC<SidebarProps> = ({ currentAgent, onSelectAgent, isOpen }
                 <button
                   key={agent.id}
                   onClick={() => onSelectAgent(agent.id)}
-                  className={`relative w-full flex items-center group overflow-hidden transition-all duration-300 rounded-lg border ${
+                  className={`relative w-full flex items-center group overflow-hidden transition-all duration-500 rounded-xl border ${
                     isActive 
-                      ? `border-${colorName}-500/50 bg-gradient-to-r from-${colorName}-900/20 to-transparent` 
+                      ? `border-${colorName}-500/50 bg-gradient-to-r from-${colorName}-900/20 to-transparent translate-x-1` 
                       : 'border-transparent hover:bg-slate-800/50 hover:border-slate-700/50'
                   }`}
                 >
                   {/* Left Accent Bar for Active State */}
-                  {isActive && (
-                      <div className={`absolute inset-y-0 left-0 w-1 bg-${colorName}-500 shadow-[0_0_15px_currentColor]`}></div>
-                  )}
+                  <div className={`absolute inset-y-0 left-0 w-1 transition-all duration-300 ${isActive ? `bg-${colorName}-500 shadow-[0_0_15px_currentColor]` : 'bg-transparent group-hover:bg-slate-700'}`}></div>
 
-                  <div className="flex items-center w-full px-5 py-4 gap-4">
-                      <div className={`p-2 rounded-md transition-all duration-300 ${isActive ? `bg-${colorName}-500 text-white shadow-[0_0_15px_rgba(0,0,0,0.5)]` : 'bg-slate-800/50 text-slate-600 group-hover:text-slate-300 group-hover:bg-slate-700'}`}>
-                         <IconComponent size={18} />
+                  <div className="flex items-center w-full px-4 py-3 gap-4">
+                      {/* Icon Container */}
+                      <div className={`
+                        relative w-10 h-10 flex items-center justify-center rounded-lg transition-all duration-500
+                        ${isActive 
+                           ? `bg-${colorName}-500 text-white shadow-[0_0_20px_rgba(0,0,0,0.3)] scale-110 rotate-0` 
+                           : 'bg-slate-800 text-slate-500 group-hover:bg-slate-700 group-hover:text-cyan-400 group-hover:scale-110 group-hover:-rotate-3'
+                        }
+                      `}>
+                         <IconComponent size={20} className={`relative z-10 transition-all duration-500 ${isActive ? 'stroke-[2.5px]' : ''}`} />
+                         {isActive && <div className="absolute inset-0 bg-white/20 animate-pulse rounded-lg"></div>}
                       </div>
                       
-                      <div className="flex flex-col items-start">
+                      <div className="flex flex-col items-start z-10">
                          <span className={`text-sm font-display font-bold tracking-wider transition-colors duration-300 ${isActive ? 'text-white text-glow' : 'text-slate-500 group-hover:text-slate-200'}`}>
                             {agent.name.split(' ')[0]}
                          </span>
-                         <span className={`text-[9px] font-mono uppercase tracking-wide ${isActive ? `text-${colorName}-400` : 'text-slate-700'}`}>
+                         <span className={`text-[9px] font-mono uppercase tracking-wide transition-colors duration-300 ${isActive ? `text-${colorName}-400` : 'text-slate-700 group-hover:text-slate-500'}`}>
                             {isActive ? '● ONLINE' : '○ STANDBY'}
                          </span>
                       </div>
@@ -90,7 +99,11 @@ const Sidebar: React.FC<SidebarProps> = ({ currentAgent, onSelectAgent, isOpen }
                   
                   {/* Right-side glow effect */}
                   {isActive && (
-                      <div className={`absolute right-0 top-1/2 -translate-y-1/2 w-8 h-16 bg-${colorName}-500/10 blur-xl rounded-full`}></div>
+                      <div className={`absolute right-0 top-1/2 -translate-y-1/2 w-12 h-24 bg-${colorName}-500/10 blur-xl rounded-full`}></div>
+                  )}
+                  {/* Hover scan effect */}
+                  {!isActive && (
+                      <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000 pointer-events-none"></div>
                   )}
                 </button>
               );
@@ -106,9 +119,19 @@ const Sidebar: React.FC<SidebarProps> = ({ currentAgent, onSelectAgent, isOpen }
                 <span className="text-[10px] font-mono text-slate-600 uppercase tracking-wider">Uptime</span>
                 <span className="text-sm font-mono text-slate-300 tracking-widest">14:02:59</span>
              </div>
-             <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse shadow-[0_0_8px_#22c55e]"></div>
+             <div className="flex items-center gap-2">
+                 <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-ping"></div>
+                 <div className="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_#22c55e]"></div>
+             </div>
          </div>
       </div>
+      
+      <style>{`
+        @keyframes shimmer {
+          0% { transform: translateX(-100%); }
+          100% { transform: translateX(100%); }
+        }
+      `}</style>
     </div>
   );
 };
