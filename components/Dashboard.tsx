@@ -120,72 +120,100 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
     if (!text.trim() && !uploadedImage) return;
 
     setIsChatView(true);
-
-    const userMsg: Message = {
-      id: Date.now().toString(),
-      role: 'user',
-      content: text,
-      senderName: 'You',
-      timestamp: new Date(),
-      imageUrl: uploadedImage ? `data:${uploadedImage.mimeType};base64,${uploadedImage.base64}` : undefined
-    };
-
-    const originAgentId = currentAgentId;
-    setChatHistory(prev => ({
-      ...prev,
-      [originAgentId]: [...prev[originAgentId], userMsg]
-    }));
-
     setInputText('');
-    setUploadedImage(null);
     setIsProcessing(true);
 
     try {
-      let targetAgentId = originAgentId;
-      let prompt = text;
-
-      // Routing Logic
-      if (originAgentId === AgentId.MASTER) {
-        const routeResult = await routeRequest(text);
-        targetAgentId = routeResult.targetAgentId;
-        
-        if (targetAgentId !== AgentId.MASTER) {
-            setCurrentAgentId(targetAgentId);
-            setChatHistory(prev => ({
-              ...prev,
-              [targetAgentId]: [...prev[targetAgentId], userMsg]
-            }));
-        }
-      }
-
-      // Generate Response
-      const { text: responseText, generatedImageUrl } = await generateAgentResponse(
-        targetAgentId,
-        prompt,
-        uploadedImage?.base64,
-        uploadedImage?.mimeType
-      );
-
-      const botMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'model',
-        content: responseText,
-        senderName: AGENTS[targetAgentId].name,
+      // 1. Initial Master Input (Log it on the current screen if plausible, or just start routing)
+      // If we are on Master, we log it there. If we are elsewhere, log it there.
+      const originAgentId = currentAgentId;
+      const userMsg: Message = {
+        id: Date.now().toString(),
+        role: 'user',
+        content: text,
+        senderName: 'You',
         timestamp: new Date(),
-        imageUrl: generatedImageUrl
+        imageUrl: uploadedImage ? `data:${uploadedImage.mimeType};base64,${uploadedImage.base64}` : undefined
       };
 
       setChatHistory(prev => ({
         ...prev,
-        [targetAgentId]: [...prev[targetAgentId], botMsg]
+        [originAgentId]: [...prev[originAgentId], userMsg]
       }));
+
+      // 2. Route Request (Brain)
+      // This now returns an ARRAY of tasks
+      let routeResult;
       
-      speak(responseText);
+      // If we are already on a specialized agent (not Master), try to keep context unless explicit switch needed?
+      // For simplicity in this Multi-Agent Hub pattern, we always re-route via Master Logic for consistency,
+      // OR we just assume the user might want to stay. 
+      // Let's assume global routing for every prompt to ensure "Jarvis" feels smart.
+      routeResult = await routeRequest(text);
+      
+      const tasks = routeResult.tasks;
+
+      // 3. Process Tasks Sequentially
+      for (const task of tasks) {
+          const { targetAgentId, specificInstruction, reasoning } = task;
+
+          // Switch Agent Context
+          setCurrentAgentId(targetAgentId);
+          
+          // Small delay for UI transition to feel natural
+          await new Promise(r => setTimeout(r, 800));
+
+          // If we switched agents, we might want to log the user prompt in that agent's history too, 
+          // or a system message saying "Task received from Master"
+          if (targetAgentId !== originAgentId) {
+              const systemMsg: Message = {
+                  id: Date.now().toString() + Math.random(),
+                  role: 'user',
+                  content: `[Routed from Master]: ${specificInstruction}`,
+                  senderName: 'System',
+                  timestamp: new Date()
+              };
+               setChatHistory(prev => ({
+                ...prev,
+                [targetAgentId]: [...prev[targetAgentId], systemMsg]
+              }));
+          }
+
+          // Generate Response
+          const { text: responseText, generatedImageUrl } = await generateAgentResponse(
+            targetAgentId,
+            specificInstruction,
+            uploadedImage?.base64,
+            uploadedImage?.mimeType
+          );
+
+          const botMsg: Message = {
+            id: (Date.now() + 1).toString() + Math.random(),
+            role: 'model',
+            content: responseText,
+            senderName: AGENTS[targetAgentId].name,
+            timestamp: new Date(),
+            imageUrl: generatedImageUrl
+          };
+
+          setChatHistory(prev => ({
+            ...prev,
+            [targetAgentId]: [...prev[targetAgentId], botMsg]
+          }));
+          
+          speak(responseText);
+          
+          // Wait before next task if there are multiple
+          if (tasks.length > 1) {
+              await new Promise(r => setTimeout(r, 2000));
+          }
+      }
 
     } catch (error) {
       console.error("Interaction failed:", error);
     } finally {
       setIsProcessing(false);
+      setUploadedImage(null);
     }
   };
 

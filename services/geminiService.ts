@@ -7,24 +7,28 @@ const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 /**
  * The "Brain" Logic - Step 1: Routing
- * Decides which agent should handle the request based on keywords and context.
+ * Decides which agent(s) should handle the request.
+ * Now supports breaking a single prompt into MULTIPLE tasks.
  */
 export const routeRequest = async (userPrompt: string): Promise<RoutingResult> => {
   const model = 'gemini-2.5-flash';
 
   const routerSystemPrompt = `
     You are the Master Router AI for 'Jarvis Hub'.
-    Your task is to analyze the user's input and route it to the correct specialized agent.
+    Your task is to analyze the user's input and break it down into one or more execution tasks.
     
     Routing Rules:
-    - Route to 'SOCIAL' if the input contains keywords like: post, tweet, instagram, caption, hashtag, viral, or requests to analyze uploaded visuals for social media.
-    - Route to 'HR' if the input contains keywords like: hiring, firing, policy, employee, leave, contract, workplace, or corporate letters.
-    - Route to 'EMAIL' if the input contains keywords like: email, draft, reply, summarize thread, inbox, or professional communication.
-    - Route to 'DESIGNER' if the input contains keywords like: generate image, create a picture, draw, design a logo, paint, illustrate, or visualize.
-    - Route to 'CODEX' if the input contains keywords like: code, write a script, html, css, javascript, react, python, function, debug, compile, app, website, component.
-    - Route to 'MASTER' for general greetings, complex reasoning not fitting the above, or unclear intents.
+    - SOCIAL: Keywords like post, tweet, instagram, caption, hashtag, viral, or social media analysis.
+    - HR: Keywords like hiring, firing, policy, employee, leave, contract, workplace.
+    - EMAIL: Keywords like email, draft, reply, summarize thread, inbox.
+    - DESIGNER: Keywords like generate image, create a picture, draw, design logo, illustrate.
+    - CODEX: Keywords like code, script, html, css, javascript, react, python, debug, app, website.
+    - MASTER: General greetings, complex reasoning not fitting the above, or unclear intents.
 
-    Output must be a strictly valid JSON object.
+    If the user asks for multiple things (e.g., "Create a logo AND write a tweet"), you MUST return a list of tasks in logical order.
+    For 'specificInstruction', extract ONLY the part of the prompt relevant to that agent.
+
+    Output must be a strictly valid JSON object containing a 'tasks' array.
   `;
 
   try {
@@ -37,36 +41,59 @@ export const routeRequest = async (userPrompt: string): Promise<RoutingResult> =
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            category: { type: Type.STRING, enum: ['SOCIAL', 'HR', 'EMAIL', 'DESIGNER', 'CODEX', 'MASTER'] },
-            reasoning: { type: Type.STRING, description: "Short explanation of why this agent was chosen." }
-          },
-          required: ['category', 'reasoning']
+            tasks: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  category: { type: Type.STRING, enum: ['SOCIAL', 'HR', 'EMAIL', 'DESIGNER', 'CODEX', 'MASTER'] },
+                  reasoning: { type: Type.STRING, description: "Short explanation." },
+                  specificInstruction: { type: Type.STRING, description: "The specific sub-prompt for this agent." }
+                },
+                required: ['category', 'reasoning', 'specificInstruction']
+              }
+            }
+          }
         }
       }
     });
 
-    const jsonText = response.text || "{}";
+    const jsonText = response.text || "{\"tasks\": []}";
     const result = JSON.parse(jsonText);
 
-    let targetAgentId = AgentId.MASTER;
-    switch (result.category) {
-      case 'SOCIAL': targetAgentId = AgentId.SOCIAL; break;
-      case 'HR': targetAgentId = AgentId.HR; break;
-      case 'EMAIL': targetAgentId = AgentId.EMAIL; break;
-      case 'DESIGNER': targetAgentId = AgentId.DESIGNER; break;
-      case 'CODEX': targetAgentId = AgentId.CODEX; break;
-      default: targetAgentId = AgentId.MASTER;
+    const tasks = result.tasks.map((t: any) => {
+        let targetAgentId = AgentId.MASTER;
+        switch (t.category) {
+          case 'SOCIAL': targetAgentId = AgentId.SOCIAL; break;
+          case 'HR': targetAgentId = AgentId.HR; break;
+          case 'EMAIL': targetAgentId = AgentId.EMAIL; break;
+          case 'DESIGNER': targetAgentId = AgentId.DESIGNER; break;
+          case 'CODEX': targetAgentId = AgentId.CODEX; break;
+          default: targetAgentId = AgentId.MASTER;
+        }
+        return {
+            targetAgentId,
+            reasoning: t.reasoning,
+            specificInstruction: t.specificInstruction || userPrompt
+        };
+    });
+
+    if (tasks.length === 0) {
+        return { tasks: [{ targetAgentId: AgentId.MASTER, reasoning: "Default", specificInstruction: userPrompt }]};
     }
 
-    return {
-      targetAgentId,
-      reasoning: result.reasoning
-    };
+    return { tasks };
 
   } catch (error) {
     console.error("Routing Error:", error);
     // Fallback to Master if routing fails
-    return { targetAgentId: AgentId.MASTER, reasoning: "Error in routing logic, defaulting to Master." };
+    return { 
+        tasks: [{ 
+            targetAgentId: AgentId.MASTER, 
+            reasoning: "Error in routing logic, defaulting to Master.", 
+            specificInstruction: userPrompt 
+        }] 
+    };
   }
 };
 

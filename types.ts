@@ -45,7 +45,12 @@ export interface AgentConfig {
   tools: AgentTool[];
 }
 
-export interface RoutingResult {
+export interface RouteTask {
   targetAgentId: AgentId;
   reasoning: string;
+  specificInstruction: string;
+}
+
+export interface RoutingResult {
+  tasks: RouteTask[];
 }
