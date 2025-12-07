@@ -4,6 +4,7 @@ import ChatMessage from './ChatMessage';
 import PulsingMic from './PulsingMic';
 import ManagerDashboard from './ManagerDashboard';
 import VideoMeet from './VideoMeet';
+import DataDeck from './DataDeck';
 import { useSpeech } from '../hooks/useSpeech';
 import { routeRequest, generateAgentResponse } from '../services/geminiService';
 import { AgentId, Message } from '../types';
@@ -18,7 +19,7 @@ interface DashboardProps {
 
 const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
   const [currentAgentId, setCurrentAgentId] = useState<AgentId>(AgentId.MASTER);
-  const [viewMode, setViewMode] = useState<'dashboard' | 'meeting'>('dashboard');
+  const [viewMode, setViewMode] = useState<'dashboard' | 'meeting' | 'datadeck'>('dashboard');
   const [isChatView, setIsChatView] = useState(false);
 
   // Centralized Chat History State
@@ -93,8 +94,14 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
   };
 
   const handleToolClick = (prompt: string) => {
+    // Check for Secure Meet
     if (prompt === 'Initiate a secure video conference channel.') {
         setViewMode('meeting');
+        return;
+    }
+    // Check for System Status
+    if (prompt === 'Run a full diagnostic on all sub-systems and report status.') {
+        setViewMode('datadeck');
         return;
     }
     setInputText(prompt);
@@ -197,8 +204,14 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
     }
   };
 
+  // --- RENDER MODES ---
+
   if (viewMode === 'meeting') {
       return <VideoMeet onLeave={() => setViewMode('dashboard')} />;
+  }
+
+  if (viewMode === 'datadeck') {
+      return <DataDeck onClose={() => setViewMode('dashboard')} />;
   }
 
   return (
